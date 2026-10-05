@@ -864,4 +864,56 @@ func TestHTTPInfoEventToSpan_LegacyPathHeaderEnrichment(t *testing.T) {
 		assert.False(t, ignored)
 		assert.Equal(t, []string{"Bearer test-token"}, span.RequestHeaders["Authorization"])
 	})
+
+	t.Run("malformed response large buffer falls back and enriches", func(t *testing.T) {
+		connInfo := BpfConnectionInfoT{
+			S_port: 54321,
+			D_port: 8080,
+			S_addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 0, 2},
+			D_addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 0, 1},
+		}
+		traceID := [16]uint8{'t', 'r', 'a', 'c', 'e', 'p', 'r', 'o', '1', '1', '7', '4', '8', 'x', 'x', 'x'}
+		spanID := [8]uint8{'s', 'p', 'a', 'n', 'i', 'd', '0', '1'}
+
+		largeRequest := "GET /api HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer test-token\r\n\r\n"
+		// Observed on nginx/openresty reverse-proxy spans: response buffer starts with a
+		// chunked size line, so net/http ReadResponse fails before status line parsing.
+		malformedResponse := "00550\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+		pctx := NewEBPFParseContext(nil, nil, nil)
+		pctx.payloadExtraction = parseCtx.payloadExtraction
+		pctx.httpEnricher = parseCtx.httpEnricher
+
+		seedLargeBuffer := func(packetType, direction uint8, payload string) {
+			hdr := TCPLargeBufferHeader{
+				PacketType: packetType,
+				Direction:  direction,
+				Len:        uint32(len(payload)),
+				Action:     largeBufferActionInit,
+				Kind:       uint8(KindLayerApp),
+			}
+			hdr.Tp.TraceId = traceID
+			hdr.Tp.SpanId = spanID
+			hdr.ConnInfo = connInfo
+			_, _, err := appendTCPLargeBuffer(pctx, toRingbufRecord(t, hdr, payload))
+			require.NoError(t, err)
+		}
+
+		seedLargeBuffer(packetTypeRequest, directionRecv, largeRequest)
+		seedLargeBuffer(packetTypeResponse, directionSend, malformedResponse)
+
+		event := BPFHTTPInfo{
+			Type:            uint8(request.EventTypeHTTP),
+			Status:          200,
+			HasLargeBuffers: 1,
+			ConnInfo:        connInfo,
+		}
+		event.Tp.TraceId = traceID
+		event.Tp.SpanId = spanID
+
+		span, ignored, err := HTTPInfoEventToSpan(pctx, &event)
+		require.NoError(t, err)
+		assert.False(t, ignored)
+		assert.Equal(t, []string{"Bearer test-token"}, span.RequestHeaders["Authorization"])
+	})
 }
