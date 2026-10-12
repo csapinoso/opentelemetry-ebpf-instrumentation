@@ -86,6 +86,10 @@ func appendTCPLargeBuffer(parseCtx *EBPFParseContext, record *ringbuf.Record) (r
 		return request.Span{}, true, fmt.Errorf("invalid large buffer action: %d", event.Action)
 	}
 
+	if lb, ok := parseCtx.largeBuffers.Get(key); ok {
+		debugLogHTTPLargeBufferChunk(event, key, chunk, lb.Len())
+	}
+
 	// Go HTTP responses are the only ones we cannot catch without making the Go uprobe code
 	// a lot more complex. The main issue is that in Go you can finish the request and never care
 	// about the response, which makes it very hard to reliably complete the Go client http request.
@@ -133,6 +137,8 @@ func extractLargeBuffer(
 		fmt.Printf("<<< LargeBufferExtract: (packet=%d direction=%d kind=%d traceId=%v spanId=%v len=%d)\nconnection info %v\n%s\n",
 			key.packetType, key.direction, int(key.kind), key.traceID, key.spanID, lb.Len(), key.connInfo, lb.UnsafeView())
 	}
+
+	debugLogHTTPLargeBufferExtract(key, lb)
 
 	parseCtx.largeBuffers.Remove(key)
 
